@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Allow sharing files from getExternalFilesDir -->
+    <external-files-path
+        name="calllogs"
+        path="." />
+</paths>

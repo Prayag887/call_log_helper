@@ -1,25 +1,107 @@
 package com.prayag.callloghelper
 
 import android.content.Context
+import android.os.Environment
 import android.provider.CallLog
 import android.util.Log
 import android.content.pm.PackageManager
 import androidx.core.app.ActivityCompat
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
 
 object CallLogManager {
 
-    private const val TAG = "CallLogManager"
+    private const val TAG = "callloghelper"
 
-    // Store the last timestamp read to avoid duplicates
-    private var lastReadTimestamp: Long = System.currentTimeMillis()
+    private const val PREFS = "calllog_prefs"
+    private const val KEY_LAST_SYNC = "last_sync"
+    private const val KEY_FIRST_INSTALL_TIME = "first_install_time"
+
+    // Small buffer to handle delayed call log writes (2 minutes)
+    private const val BUFFER_MS = 2 * 60 * 1000
+
+    private fun getLogsFile(): File {
+        val fileDir = File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS),
+            "calllog"
+        )
+        if (!fileDir.exists()) {
+            val success = fileDir.mkdirs()
+            Log.d(TAG, "Created calllog dir: $success, path: ${fileDir.absolutePath}")
+        }
+        return File(fileDir, "logs.json")
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // PUBLIC: Export logs to file
+    // ─────────────────────────────────────────────────────────────
+
+    fun exportCallLogsToFile(context: Context): File? {
+        val file = getLogsFile()
+        val logs = getNewCallLogs(context)
+
+        if (logs.isEmpty()) {
+            if (!file.exists()) file.writeText("[]")
+            Log.d(TAG, "No new logs, file ensured at: ${file.absolutePath}")
+            return file
+        }
+
+        // Read existing logs if file exists
+        val existingLogs = if (file.exists()) {
+            runCatching {
+                val text = file.readText().takeIf { it.isNotBlank() } ?: "[]"
+                JSONArray(text)
+            }.getOrElse { JSONArray() }
+        } else {
+            JSONArray()
+        }
+
+        // Combine existing + new logs
+        val combinedLogs = mutableListOf<JSONObject>()
+        for (i in 0 until existingLogs.length()) combinedLogs.add(existingLogs.getJSONObject(i))
+        logs.forEach { log ->
+            val obj = JSONObject()
+            log.forEach { (k, v) -> obj.put(k, v) }
+            combinedLogs.add(obj)
+        }
+
+        // Deduplicate by "id + date" and keep only last 24 hours
+        val cutoff = System.currentTimeMillis() - 24 * 60 * 60 * 1000
+        val seen = mutableSetOf<String>()
+        val finalLogs = combinedLogs.filter {
+            val key = "${it.getLong("id")}_${it.getLong("date")}"
+            val timestamp = it.getLong("date")
+            if (timestamp < cutoff) return@filter false
+            if (seen.contains(key)) return@filter false
+            seen.add(key)
+            true
+        }
+
+        // Write filtered logs to file
+        val outArray = JSONArray()
+        finalLogs.forEach { outArray.put(it) }
+        file.writeText(outArray.toString())
+
+        Log.d(TAG, "Logs exported (${finalLogs.size}) to: ${file.absolutePath}")
+        return file
+    }
 
     fun getNewCallLogs(context: Context): List<Map<String, Any?>> {
-        if (ActivityCompat.checkSelfPermission(context, android.Manifest.permission.READ_CALL_LOG)
-            != PackageManager.PERMISSION_GRANTED
+        if (ActivityCompat.checkSelfPermission(
+                context,
+                android.Manifest.permission.READ_CALL_LOG
+            ) != PackageManager.PERMISSION_GRANTED
         ) {
             Log.e(TAG, "READ_CALL_LOG permission not granted")
             return emptyList()
         }
+
+        val lastSync = getLastSync(context)
+        val installTime = getFirstInstallTime(context)
+
+        // Apply buffer to avoid missing late logs
+        val effectiveStart = maxOf(installTime, lastSync - BUFFER_MS)
 
         val projection = arrayOf(
             CallLog.Calls._ID,
@@ -34,11 +116,12 @@ object CallLogManager {
             CallLog.Calls.CONTENT_URI,
             projection,
             "${CallLog.Calls.DATE} > ?",
-            arrayOf(lastReadTimestamp.toString()),
+            arrayOf(effectiveStart.toString()),
             "${CallLog.Calls.DATE} ASC"
         )
 
         val newLogs = mutableListOf<Map<String, Any?>>()
+        var latestTimestamp = lastSync
 
         cursor?.use {
             while (it.moveToNext()) {
@@ -51,31 +134,68 @@ object CallLogManager {
 
                 val type = mapCallType(androidType)
                 val status = mapCallStatus(androidType, duration, newFlag)
+                val startTime = date
+                val endTime = if (duration > 0) date + (duration * 1000L) else date
 
                 newLogs.add(
                     mapOf(
-                        "id" to id,
-                        "number" to number,
-                        "type" to type,
-                        "status" to status,
-                        "date" to date,
-                        "duration" to duration
+                        "id"         to id,
+                        "number"     to number,
+                        "type"       to type,
+                        "status"     to status,
+                        "date"       to date,
+                        "duration"   to duration,
+                        "start_time" to startTime,
+                        "end_time"   to endTime
                     )
                 )
 
-                if (date > lastReadTimestamp) lastReadTimestamp = date
+                if (date > latestTimestamp) {
+                    latestTimestamp = date
+                }
             }
         }
 
-        Log.d(TAG, "Fetched ${newLogs.size} new call logs with type/status")
+        saveLastSync(context, latestTimestamp)
+
+        Log.d(TAG, "Fetched ${newLogs.size} logs (since $effectiveStart)")
         return newLogs
     }
 
+    private fun getLastSync(context: Context): Long {
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getLong(KEY_LAST_SYNC, 0L)
+    }
+
+    private fun saveLastSync(context: Context, timestamp: Long) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_LAST_SYNC, timestamp)
+            .apply()
+    }
+
+    private fun getFirstInstallTime(context: Context): Long {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        var first = prefs.getLong(KEY_FIRST_INSTALL_TIME, -1)
+
+        if (first == -1L) {
+            first = System.currentTimeMillis()
+            prefs.edit().putLong(KEY_FIRST_INSTALL_TIME, first).apply()
+            Log.d(TAG, "First install timestamp saved: $first")
+        }
+
+        return first
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Mapping helpers
+    // ─────────────────────────────────────────────────────────────
+
     private fun mapCallType(androidType: Int): Int {
         return when (androidType) {
-            CallLog.Calls.INCOMING_TYPE -> 0 // INCOMING
-            CallLog.Calls.OUTGOING_TYPE -> 1 // OUTGOING
-            CallLog.Calls.MISSED_TYPE -> 0   // treat as incoming, status = MISSED
+            CallLog.Calls.INCOMING_TYPE -> 0
+            CallLog.Calls.OUTGOING_TYPE -> 1
+            CallLog.Calls.MISSED_TYPE -> 0
             else -> 0
         }
     }
