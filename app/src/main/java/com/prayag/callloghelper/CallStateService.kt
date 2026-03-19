@@ -7,7 +7,9 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.telephony.PhoneStateListener
 import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
@@ -21,17 +23,16 @@ class CallStateService : Service() {
         const val TAG = "callloghelper"
         private const val CHANNEL_ID = "calllog_service_channel"
         private const val NOTIFICATION_ID = 1001
+        // Delay after call ends before reading the log — provider needs time to persist
+        private const val POST_CALL_DELAY_MS = 2_000L
     }
 
     private lateinit var telephonyManager: TelephonyManager
+    private val mainHandler = Handler(Looper.getMainLooper())
 
-    // For API < 31
     private var legacyListener: PhoneStateListener? = null
-
-    // For API >= 31
     private var modernCallback: TelephonyCallback? = null
 
-    // Track previous state to detect call-end transitions
     private var previousState = TelephonyManager.CALL_STATE_IDLE
 
     override fun onCreate() {
@@ -43,12 +44,12 @@ class CallStateService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Restart if killed by system
         return START_STICKY
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        mainHandler.removeCallbacksAndMessages(null)
         unregisterPhoneStateListener()
         Log.d(TAG, "CallStateService destroyed")
     }
@@ -99,34 +100,56 @@ class CallStateService : Service() {
     }
 
     // ─────────────────────────────────────────────────────────────
-    // State change handler
+    // State change handler — writes log on every meaningful transition
     // ─────────────────────────────────────────────────────────────
 
     private fun handleStateChange(newState: Int) {
         val stateLabel = when (newState) {
-            TelephonyManager.CALL_STATE_IDLE -> "IDLE"
-            TelephonyManager.CALL_STATE_RINGING -> "RINGING"
-            TelephonyManager.CALL_STATE_OFFHOOK -> "OFFHOOK"
-            else -> "UNKNOWN"
+            TelephonyManager.CALL_STATE_IDLE     -> "IDLE"
+            TelephonyManager.CALL_STATE_RINGING  -> "RINGING"
+            TelephonyManager.CALL_STATE_OFFHOOK  -> "OFFHOOK"
+            else                                 -> "UNKNOWN"
         }
-        Log.d(TAG, "Call state changed: $stateLabel (prev: $previousState)")
+        Log.d(TAG, "Call state: $stateLabel (prev: $previousState)")
 
-        // A call just ended: was active/ringing, now idle
-        val callJustEnded = (previousState == TelephonyManager.CALL_STATE_OFFHOOK ||
-                previousState == TelephonyManager.CALL_STATE_RINGING) &&
-                newState == TelephonyManager.CALL_STATE_IDLE
+        when {
+            // Incoming call is ringing — log it immediately so missed calls are captured
+            // even if the user never picks up
+            newState == TelephonyManager.CALL_STATE_RINGING -> {
+                Log.d(TAG, "Incoming call ringing — writing log")
+                exportAsync(delayMs = 0)
+            }
 
-        if (callJustEnded) {
-            Log.d(TAG, "Call ended — exporting logs")
-            // Small delay: call log provider may take a moment to persist the record
-            Thread {
-                Thread.sleep(2000)
-                val file = CallLogManager.exportCallLogsToFile(applicationContext)
-                Log.d(TAG, "Logs written after call end: ${file?.absolutePath}")
-            }.start()
+            // Call was answered (incoming or outgoing)
+            newState == TelephonyManager.CALL_STATE_OFFHOOK &&
+                    previousState != TelephonyManager.CALL_STATE_OFFHOOK -> {
+                Log.d(TAG, "Call answered/started — writing log")
+                exportAsync(delayMs = 0)
+            }
+
+            // Call just ended — delay slightly so the provider can persist the record
+            newState == TelephonyManager.CALL_STATE_IDLE &&
+                    (previousState == TelephonyManager.CALL_STATE_OFFHOOK ||
+                            previousState == TelephonyManager.CALL_STATE_RINGING) -> {
+                Log.d(TAG, "Call ended — writing log after ${POST_CALL_DELAY_MS}ms delay")
+                exportAsync(delayMs = POST_CALL_DELAY_MS)
+            }
         }
 
         previousState = newState
+    }
+
+    /**
+     * Runs [CallLogManager.exportCallLogsToFile] on a background thread after [delayMs].
+     * Uses Handler so the delay is cancellable and doesn't leak threads.
+     */
+    private fun exportAsync(delayMs: Long) {
+        mainHandler.postDelayed({
+            Thread {
+                val file = CallLogManager.exportCallLogsToFile(applicationContext)
+                Log.d(TAG, "Export complete: ${file?.absolutePath}")
+            }.start()
+        }, delayMs)
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -138,7 +161,7 @@ class CallStateService : Service() {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "Call Log Service",
-                NotificationManager.IMPORTANCE_MIN   // silent, no sound
+                NotificationManager.IMPORTANCE_MIN
             ).apply {
                 description = "Monitors call state to export logs"
                 setShowBadge(false)
