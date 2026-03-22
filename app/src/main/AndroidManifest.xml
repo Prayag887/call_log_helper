@@ -22,10 +22,6 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Callloghelper">
 
-
-
-        <!-- Inside <application> -->
-
         <service
             android:name=".CallStateService"
             android:exported="false"
@@ -33,11 +29,13 @@
 
         <!-- Listens for call state changes WITHOUT the app being open.
              Registered statically so Android delivers the broadcast to a
-             fresh receiver instance even if the process is not running. -->
+             fresh receiver instance even if the process is not running.
+             No android:permission here — that attribute restricts who can
+             SEND to this receiver, and the system telephony service does
+             not hold READ_PHONE_STATE as a sender, so it would block delivery. -->
         <receiver
             android:name=".PhoneStateReceiver"
-            android:exported="true"
-            android:permission="android.permission.READ_PHONE_STATE">
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.PHONE_STATE" />
             </intent-filter>
@@ -52,7 +50,6 @@
             </intent-filter>
         </receiver>
 
-        <!-- MainActivity -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -69,7 +66,6 @@
             android:authorities="com.prayag.callloghelper.fileprovider"
             android:exported="false"
             android:grantUriPermissions="true">
-
             <meta-data
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />

@@ -31,9 +31,6 @@ class CallStateService : Service() {
     // For API >= 31
     private var modernCallback: TelephonyCallback? = null
 
-    // Track previous state to detect call-end transitions
-    private var previousState = TelephonyManager.CALL_STATE_IDLE
-
     override fun onCreate() {
         super.onCreate()
         telephonyManager = getSystemService(TELEPHONY_SERVICE) as TelephonyManager
@@ -99,34 +96,33 @@ class CallStateService : Service() {
     }
 
     // ─────────────────────────────────────────────────────────────
-    // State change handler
+    // State change handler — stateless, triggers on every IDLE
     // ─────────────────────────────────────────────────────────────
 
     private fun handleStateChange(newState: Int) {
         val stateLabel = when (newState) {
-            TelephonyManager.CALL_STATE_IDLE -> "IDLE"
-            TelephonyManager.CALL_STATE_RINGING -> "RINGING"
-            TelephonyManager.CALL_STATE_OFFHOOK -> "OFFHOOK"
-            else -> "UNKNOWN"
+            TelephonyManager.CALL_STATE_IDLE     -> "IDLE"
+            TelephonyManager.CALL_STATE_RINGING  -> "RINGING"
+            TelephonyManager.CALL_STATE_OFFHOOK  -> "OFFHOOK"
+            else                                 -> "UNKNOWN"
         }
-        Log.d(TAG, "Call state changed: $stateLabel (prev: $previousState)")
+        Log.d(TAG, "Call state changed: $stateLabel")
 
-        // A call just ended: was active/ringing, now idle
-        val callJustEnded = (previousState == TelephonyManager.CALL_STATE_OFFHOOK ||
-                previousState == TelephonyManager.CALL_STATE_RINGING) &&
-                newState == TelephonyManager.CALL_STATE_IDLE
+        if (newState != TelephonyManager.CALL_STATE_IDLE) return
 
-        if (callJustEnded) {
-            Log.d(TAG, "Call ended — exporting logs")
-            // Small delay: call log provider may take a moment to persist the record
-            Thread {
-                Thread.sleep(2000)
+        Log.d(TAG, "IDLE detected — scheduling log export")
+
+        // Delay: call log ContentProvider may take a moment to persist the record.
+        // CallLogManager deduplicates, so triggering on every IDLE is safe.
+        Thread {
+            try {
+                Thread.sleep(3_000)
                 val file = CallLogManager.exportCallLogsToFile(applicationContext)
-                Log.d(TAG, "Logs written after call end: ${file?.absolutePath}")
-            }.start()
-        }
-
-        previousState = newState
+                Log.d(TAG, "Logs written after IDLE: ${file?.absolutePath}")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error exporting logs", e)
+            }
+        }.start()
     }
 
     // ─────────────────────────────────────────────────────────────

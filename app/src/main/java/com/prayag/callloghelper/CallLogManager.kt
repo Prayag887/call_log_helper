@@ -2,10 +2,14 @@ package com.prayag.callloghelper
 
 import android.content.Context
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.provider.CallLog
 import android.util.Log
 import android.content.pm.PackageManager
+import android.widget.Toast
 import androidx.core.app.ActivityCompat
+import androidx.core.content.edit
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -84,6 +88,16 @@ object CallLogManager {
         file.writeText(outArray.toString())
 
         Log.d(TAG, "Logs exported (${finalLogs.size}) to: ${file.absolutePath}")
+
+        // Show toast on main thread (safe to call from background too)
+        Handler(Looper.getMainLooper()).post {
+            Toast.makeText(
+                context,
+                "${finalLogs.size} call log(s) saved to logs.json",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+
         return file
     }
 
@@ -169,9 +183,9 @@ object CallLogManager {
 
     private fun saveLastSync(context: Context, timestamp: Long) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit()
-            .putLong(KEY_LAST_SYNC, timestamp)
-            .apply()
+            .edit {
+                putLong(KEY_LAST_SYNC, timestamp)
+            }
     }
 
     private fun getFirstInstallTime(context: Context): Long {
@@ -180,7 +194,7 @@ object CallLogManager {
 
         if (first == -1L) {
             first = System.currentTimeMillis()
-            prefs.edit().putLong(KEY_FIRST_INSTALL_TIME, first).apply()
+            prefs.edit { putLong(KEY_FIRST_INSTALL_TIME, first) }
             Log.d(TAG, "First install timestamp saved: $first")
         }
 
