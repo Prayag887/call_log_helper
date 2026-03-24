@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<device-admin>
+    <uses-policies>
+        <!-- No explicit policies needed; just using the admin status to prevent easy force-stopping -->
+    </uses-policies>
+</device-admin>

@@ -41,64 +41,87 @@ object CallLogManager {
     // PUBLIC: Export logs to file
     // ─────────────────────────────────────────────────────────────
 
+    private val fileLock = Any()
+
     fun exportCallLogsToFile(context: Context): File? {
-        val file = getLogsFile()
-        val logs = getNewCallLogs(context)
+        synchronized(fileLock) {
+            try {
+                val file = getLogsFile()
+                val logs = getNewCallLogs(context)
 
-        if (logs.isEmpty()) {
-            if (!file.exists()) file.writeText("[]")
-            Log.d(TAG, "No new logs, file ensured at: ${file.absolutePath}")
-            return file
+                if (logs.isEmpty()) {
+                    if (!file.exists()) file.writeText("[]")
+                    Log.d(TAG, "No new logs, file ensured at: ${file.absolutePath}")
+                    return file
+                }
+
+                // Read existing logs safely
+                val existingLogs = if (file.exists()) {
+                    runCatching {
+                        val text = file.readText().takeIf { it.isNotBlank() } ?: "[]"
+                        JSONArray(text)
+                    }.getOrElse {
+                        Log.e(TAG, "Corrupted JSON, resetting file")
+                        JSONArray()
+                    }
+                } else {
+                    JSONArray()
+                }
+
+                // Combine existing + new logs
+                val combinedLogs = mutableListOf<JSONObject>()
+
+                for (i in 0 until existingLogs.length()) {
+                    combinedLogs.add(existingLogs.getJSONObject(i))
+                }
+
+                logs.forEach { log ->
+                    val obj = JSONObject()
+                    log.forEach { (k, v) -> obj.put(k, v) }
+                    combinedLogs.add(obj)
+                }
+
+                // Deduplicate + keep last 24h
+                val cutoff = System.currentTimeMillis() - 24 * 60 * 60 * 1000
+                val seen = mutableSetOf<String>()
+
+                val finalLogs = combinedLogs.filter {
+                    val key = "${it.getLong("id")}_${it.getLong("date")}"
+                    val timestamp = it.getLong("date")
+
+                    if (timestamp < cutoff) return@filter false
+                    if (!seen.add(key)) return@filter false
+
+                    true
+                }
+
+                val outArray = JSONArray()
+                finalLogs.forEach { outArray.put(it) }
+
+                // ✅ SAFE WRITE (no rename, no tmp, no MediaProvider conflict)
+                file.outputStream().use { fos ->
+                    fos.write(outArray.toString().toByteArray())
+                    fos.flush()
+                    fos.fd.sync() // 🔥 ensures data is fully written to disk
+                }
+
+                Log.d(TAG, "Logs exported (${finalLogs.size}) to: ${file.absolutePath}")
+
+                Handler(Looper.getMainLooper()).post {
+                    Toast.makeText(
+                        context,
+                        "${finalLogs.size} call log(s) saved to logs.json",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+
+                return file
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Error writing logs", e)
+                return null
+            }
         }
-
-        // Read existing logs if file exists
-        val existingLogs = if (file.exists()) {
-            runCatching {
-                val text = file.readText().takeIf { it.isNotBlank() } ?: "[]"
-                JSONArray(text)
-            }.getOrElse { JSONArray() }
-        } else {
-            JSONArray()
-        }
-
-        // Combine existing + new logs
-        val combinedLogs = mutableListOf<JSONObject>()
-        for (i in 0 until existingLogs.length()) combinedLogs.add(existingLogs.getJSONObject(i))
-        logs.forEach { log ->
-            val obj = JSONObject()
-            log.forEach { (k, v) -> obj.put(k, v) }
-            combinedLogs.add(obj)
-        }
-
-        // Deduplicate by "id + date" and keep only last 24 hours
-        val cutoff = System.currentTimeMillis() - 24 * 60 * 60 * 1000
-        val seen = mutableSetOf<String>()
-        val finalLogs = combinedLogs.filter {
-            val key = "${it.getLong("id")}_${it.getLong("date")}"
-            val timestamp = it.getLong("date")
-            if (timestamp < cutoff) return@filter false
-            if (seen.contains(key)) return@filter false
-            seen.add(key)
-            true
-        }
-
-        // Write filtered logs to file
-        val outArray = JSONArray()
-        finalLogs.forEach { outArray.put(it) }
-        file.writeText(outArray.toString())
-
-        Log.d(TAG, "Logs exported (${finalLogs.size}) to: ${file.absolutePath}")
-
-        // Show toast on main thread (safe to call from background too)
-        Handler(Looper.getMainLooper()).post {
-            Toast.makeText(
-                context,
-                "${finalLogs.size} call log(s) saved to logs.json",
-                Toast.LENGTH_SHORT
-            ).show()
-        }
-
-        return file
     }
 
     fun getNewCallLogs(context: Context): List<Map<String, Any?>> {
