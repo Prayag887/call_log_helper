@@ -49,12 +49,6 @@ object CallLogManager {
                 val file = getLogsFile()
                 val logs = getNewCallLogs(context)
 
-                if (logs.isEmpty()) {
-                    if (!file.exists()) file.writeText("[]")
-                    Log.d(TAG, "No new logs, file ensured at: ${file.absolutePath}")
-                    return file
-                }
-
                 // Read existing logs safely
                 val existingLogs = if (file.exists()) {
                     runCatching {
@@ -98,14 +92,18 @@ object CallLogManager {
                 val outArray = JSONArray()
                 finalLogs.forEach { outArray.put(it) }
 
-                // ✅ SAFE WRITE (no rename, no tmp, no MediaProvider conflict)
+                // Always rewrite the file so downstream consumers see a fresh snapshot
+                // even when no new rows were added on this run.
                 file.outputStream().use { fos ->
                     fos.write(outArray.toString().toByteArray())
                     fos.flush()
-                    fos.fd.sync() // 🔥 ensures data is fully written to disk
+                    fos.fd.sync() //ensures data is fully written to disk
                 }
 
-                Log.d(TAG, "Logs exported (${finalLogs.size}) to: ${file.absolutePath}")
+                Log.d(
+                    TAG,
+                    "Logs exported (${finalLogs.size} total, ${logs.size} new) to: ${file.absolutePath}"
+                )
 
                 Handler(Looper.getMainLooper()).post {
                     Toast.makeText(
